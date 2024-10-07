@@ -22,18 +22,18 @@ import dmd.delegatize;
 import dmd.dscope;
 import dmd.dstruct;
 import dmd.dsymbol;
-import dmd.dsymbolsem;
+import dmd.dsymbolsem : dsymbolSemantic, aliasSemantic;
 import dmd.dtemplate;
 import dmd.errors;
 import dmd.expression;
 import dmd.func;
-import dmd.funcsem;
+import dmd.funcsem : overloadApply, getLevelAndCheck;
 import dmd.globals;
 import dmd.gluelayer;
 import dmd.id;
 import dmd.identifier;
 import dmd.init;
-import dmd.initsem;
+import dmd.initsem : initializerToExpression, initializerSemantic;
 import dmd.intrange;
 import dmd.location;
 import dmd.mtype;
@@ -42,7 +42,7 @@ import dmd.rootobject;
 import dmd.root.filename;
 import dmd.target;
 import dmd.tokens;
-import dmd.typesem;
+import dmd.typesem : toDsymbol, typeSemantic, size, hasPointers;
 import dmd.visitor;
 
 version (IN_GCC) {}
@@ -123,90 +123,6 @@ extern (C++) abstract class Declaration : Dsymbol
         if (sz == SIZE_INVALID)
             errors = true;
         return sz;
-    }
-
-    /**
-     * Issue an error if an attempt to call a disabled method is made
-     *
-     * If the declaration is disabled but inside a disabled function,
-     * returns `true` but do not issue an error message.
-     *
-     * Params:
-     *   loc = Location information of the call
-     *   sc  = Scope in which the call occurs
-     *   isAliasedDeclaration = if `true` searches overload set
-     *
-     * Returns:
-     *   `true` if this `Declaration` is `@disable`d, `false` otherwise.
-     */
-    extern (D) final bool checkDisabled(Loc loc, Scope* sc, bool isAliasedDeclaration = false)
-    {
-        if (!(storage_class & STC.disable))
-            return false;
-
-        if (sc.func && sc.func.storage_class & STC.disable)
-            return true;
-
-        if (auto p = toParent())
-        {
-            if (auto postblit = isPostBlitDeclaration())
-            {
-                /* https://issues.dlang.org/show_bug.cgi?id=21885
-                 *
-                 * If the generated postblit is disabled, it
-                 * means that one of the fields has a disabled
-                 * postblit. Print the first field that has
-                 * a disabled postblit.
-                 */
-                if (postblit.isGenerated())
-                {
-                    auto sd = p.isStructDeclaration();
-                    assert(sd);
-                    for (size_t i = 0; i < sd.fields.length; i++)
-                    {
-                        auto structField = sd.fields[i];
-                        if (structField.overlapped)
-                            continue;
-                        Type tv = structField.type.baseElemOf();
-                        if (tv.ty != Tstruct)
-                            continue;
-                        auto sdv = (cast(TypeStruct)tv).sym;
-                        if (!sdv.postblit)
-                            continue;
-                        if (sdv.postblit.isDisabled())
-                        {
-                            .error(loc, "%s `%s` is not copyable because field `%s` is not copyable", p.kind, p.toPrettyChars, structField.toChars());
-                            return true;
-                        }
-                    }
-                }
-                .error(loc, "%s `%s` is not copyable because it has a disabled postblit", p.kind, p.toPrettyChars);
-                return true;
-            }
-        }
-
-        // if the function is @disabled, maybe there
-        // is an overload in the overload set that isn't
-        if (isAliasedDeclaration)
-        {
-            if (FuncDeclaration fd = isFuncDeclaration())
-            {
-                for (FuncDeclaration ovl = fd; ovl; ovl = cast(FuncDeclaration)ovl.overnext)
-                    if (!(ovl.storage_class & STC.disable))
-                        return false;
-            }
-        }
-
-        if (auto ctor = isCtorDeclaration())
-        {
-            if (ctor.isCpCtor && ctor.isGenerated())
-            {
-                .error(loc, "generating an `inout` copy constructor for `struct %s` failed, therefore instances of it are uncopyable", parent.toPrettyChars());
-                return true;
-            }
-        }
-        .error(loc, "%s `%s` cannot be used because it is annotated with `@disable`", kind, toPrettyChars);
-        return true;
     }
 
     final bool isStatic() const pure nothrow @nogc @safe
@@ -700,6 +616,15 @@ extern (C++) final class AliasDeclaration : Declaration
         assert(this != aliassym);
         //static int count; if (++count == 10) *(char*)0=0;
 
+        Dsymbol err()
+        {
+            // Avoid breaking "recursive alias" state during errors gagged
+            if (global.gag)
+                return this;
+            aliassym = new AliasDeclaration(loc, ident, Type.terror);
+            type = Type.terror;
+            return aliassym;
+        }
         // Reading the AliasDeclaration
         if (!(adFlags & ignoreRead))
             adFlags |= wasRead;                 // can never assign to this AliasDeclaration again
@@ -711,12 +636,12 @@ extern (C++) final class AliasDeclaration : Declaration
             Dsymbol s = type.toDsymbol(_scope);
             //printf("[%s] type = %s, s = %p, this = %p\n", loc.toChars(), type.toChars(), s, this);
             if (global.errors != olderrors)
-                goto Lerr;
+                return err();
             if (s)
             {
                 s = s.toAlias();
                 if (global.errors != olderrors)
-                    goto Lerr;
+                    return err();
                 aliassym = s;
                 inuse = 0;
             }
@@ -724,9 +649,9 @@ extern (C++) final class AliasDeclaration : Declaration
             {
                 Type t = type.typeSemantic(loc, _scope);
                 if (t.ty == Terror)
-                    goto Lerr;
+                    return err();
                 if (global.errors != olderrors)
-                    goto Lerr;
+                    return err();
                 //printf("t = %s\n", t.toChars());
                 inuse = 0;
             }
@@ -734,14 +659,7 @@ extern (C++) final class AliasDeclaration : Declaration
         if (inuse)
         {
             .error(loc, "%s `%s` recursive alias declaration", kind, toPrettyChars);
-
-        Lerr:
-            // Avoid breaking "recursive alias" state during errors gagged
-            if (global.gag)
-                return this;
-            aliassym = new AliasDeclaration(loc, ident, Type.terror);
-            type = Type.terror;
-            return aliassym;
+            return err();
         }
 
         if (semanticRun >= PASS.semanticdone)
@@ -1127,7 +1045,7 @@ extern (C++) class VarDeclaration : Declaration
         auto vbitoffset = v.offset * 8;
 
         // Bitsize of types are overridden by any bit-field widths.
-        ulong tbitsize = void;
+        ulong tbitsize;
         if (auto bf = isBitFieldDeclaration())
         {
             bitoffset += bf.bitOffset;
@@ -1136,7 +1054,7 @@ extern (C++) class VarDeclaration : Declaration
         else
             tbitsize = tsz * 8;
 
-        ulong vbitsize = void;
+        ulong vbitsize;
         if (auto vbf = v.isBitFieldDeclaration())
         {
             vbitoffset += vbf.bitOffset;
@@ -1201,25 +1119,6 @@ extern (C++) class VarDeclaration : Declaration
 
         Expression e = _init.initializerToExpression(needFullType ? type : null);
         global.gag = oldgag;
-        return e;
-    }
-
-    /*******************************************
-     * Helper function for the expansion of manifest constant.
-     */
-    extern (D) final Expression expandInitializer(Loc loc)
-    {
-        assert((storage_class & STC.manifest) && _init);
-
-        auto e = getConstInitializer();
-        if (!e)
-        {
-            .error(loc, "cannot make expression out of initializer for `%s`", toChars());
-            return ErrorExp.get();
-        }
-
-        e = e.copy();
-        e.loc = loc;    // for better error message
         return e;
     }
 

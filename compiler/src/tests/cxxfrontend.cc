@@ -1298,7 +1298,7 @@ public:
             return;
         (void)d->sinit;
         StructLiteralExp *sle = StructLiteralExp::create(d->loc, d, NULL);
-        if (!d->fill(d->loc, *sle->elements, true))
+        if (!dmd::fill(d, d->loc, *sle->elements, true))
             assert(0);
         sle->type = d->type;
         sle->accept(this);
@@ -1865,7 +1865,7 @@ void template_h(TemplateParameter *tp, Scope *sc, TemplateParameters *tps,
 void typinf_h(Expression *e, const Loc &loc, Type *t, Scope *sc)
 {
     dmd::genTypeInfo(e, loc, t, sc);
-    ::getTypeInfoType(loc, t, sc, false);
+    ::getTypeInfoType(loc, t, sc);
     dmd::isSpeculativeType(t);
     dmd::builtinTypeInfo(t);
 }

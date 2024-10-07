@@ -836,7 +836,9 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
         L1:
             if (parameterList.varargs == VarArg.typesafe && u + 1 == nparams) // if last varargs param
             {
-                auto trailingArgs = args[u .. $];
+                Expression[] trailingArgs;
+                if (args.length >= u)
+                    trailingArgs = args[u .. $];
                 if (auto vmatch = matchTypeSafeVarArgs(tf, p, trailingArgs, pMessage))
                     return vmatch < match ? vmatch : match;
                 // Error message was already generated in `matchTypeSafeVarArgs`
@@ -905,25 +907,19 @@ private extern(D) bool isCopyConstructorCallable (StructDeclaration argStruct,
      */
     OutBuffer buf;
     auto callExp = e.isCallExp();
-    void nocpctor()
+
+    bool nocpctor()
     {
         buf.printf("`struct %s` does not define a copy constructor for `%s` to `%s` copies",
                    argStruct.toChars(), arg.type.toChars(), tprm.toChars());
-    }
-    auto f = callExp.f;
-    if (!f)
-    {
-        nocpctor();
         *pMessage = buf.extractChars();
         return false;
     }
-    char[] s;
-    if (!f.isPure && sc.func.setImpure())
-        s ~= "pure ";
-    if (!f.isSafe() && !f.isTrusted() && sc.setUnsafe())
-        s ~= "@safe ";
-    if (!f.isNogc && sc.func.setGC(arg.loc, null))
-        s ~= "nogc ";
+
+    auto f = callExp.f;
+    if (!f)
+        return nocpctor();
+
     if (f.isDisabled() && !f.isGenerated())
     {
         /* https://issues.dlang.org/show_bug.cgi?id=24301
@@ -931,11 +927,21 @@ private extern(D) bool isCopyConstructorCallable (StructDeclaration argStruct,
          */
         buf.printf("`%s` copy constructor cannot be used because it is annotated with `@disable`",
             f.type.toChars());
+        *pMessage = buf.extractChars();
+        return false;
     }
-    else if (s)
+
+    bool bpure = !f.isPure && sc.func.setImpure();
+    bool bsafe = !f.isSafe() && !f.isTrusted() && sc.setUnsafe();
+    bool bnogc = !f.isNogc && sc.func.setGC(arg.loc, null);
+    if (bpure | bsafe | bnogc)
     {
-        s[$-1] = '\0';
-        buf.printf("`%s` copy constructor cannot be called from a `%s` context", f.type.toChars(), s.ptr);
+        const nullptr = "".ptr;
+        buf.printf("`%s` copy constructor cannot be called from a `%s%s%s` context",
+            f.type.toChars(),
+            bpure ? "pure " .ptr : nullptr,
+            bsafe ? "@safe ".ptr : nullptr,
+            bnogc ? "nogc"  .ptr : nullptr);
     }
     else if (f.isGenerated() && f.isDisabled())
     {
@@ -951,7 +957,7 @@ private extern(D) bool isCopyConstructorCallable (StructDeclaration argStruct,
          * i.e: `inout` constructor creates `const` object, not mutable.
          * Fallback to using the original generic error before https://issues.dlang.org/show_bug.cgi?id=22202.
          */
-        nocpctor();
+        return nocpctor();
     }
 
     *pMessage = buf.extractChars();
@@ -7849,7 +7855,7 @@ Expression getMaxMinValue(EnumDeclaration ed, const ref Loc loc, Identifier id)
 RootObject compileTypeMixin(TypeMixin tm, ref const Loc loc, Scope* sc)
 {
     OutBuffer buf;
-    if (expressionsToString(buf, sc, tm.exps))
+    if (expressionsToString(buf, sc, tm.exps, tm.loc, null, true))
         return null;
 
     const errors = global.errors;

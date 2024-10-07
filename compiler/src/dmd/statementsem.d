@@ -57,6 +57,7 @@ import dmd.opover;
 import dmd.parse;
 import dmd.common.outbuffer;
 import dmd.root.string;
+import dmd.safe : isSafe, setUnsafe;
 import dmd.semantic2;
 import dmd.sideeffect;
 import dmd.statement;
@@ -4802,7 +4803,7 @@ private Statements* flatten(Statement statement, Scope* sc)
 
 
             OutBuffer buf;
-            if (expressionsToString(buf, sc, cs.exps))
+            if (expressionsToString(buf, sc, cs.exps, cs.loc, null, true))
                 return errorStatements();
 
             const errors = global.errors;

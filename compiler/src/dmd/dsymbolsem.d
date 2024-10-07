@@ -67,6 +67,7 @@ import dmd.root.filename;
 import dmd.common.outbuffer;
 import dmd.root.rmem;
 import dmd.rootobject;
+import dmd.safe;
 import dmd.semantic2;
 import dmd.semantic3;
 import dmd.sideeffect;
@@ -1831,7 +1832,7 @@ private extern(C++) final class DsymbolSemanticVisitor : Visitor
     {
         //printf("MixinDeclaration::compileIt(loc = %d) %s\n", cd.loc.linnum, cd.exp.toChars());
         OutBuffer buf;
-        if (expressionsToString(buf, sc, cd.exps))
+        if (expressionsToString(buf, sc, cd.exps, cd.loc, null, true))
             return null;
 
         const errors = global.errors;
@@ -5927,67 +5928,6 @@ private void writeMixin(const(char)[] s, ref const Loc loc, ref int lines, ref O
     ++lines;
 }
 
-/**
- * Check signature of `pragma(printf)` function, print error if invalid.
- *
- * printf/scanf-like functions must be of the form:
- *    extern (C/C++) T printf([parameters...], const(char)* format, ...);
- * or:
- *    extern (C/C++) T vprintf([parameters...], const(char)* format, va_list);
- *
- * Params:
- *      funcdecl = function to check
- *      f = function type
- *      sc = scope
- */
-void checkPrintfScanfSignature(FuncDeclaration funcdecl, TypeFunction f, Scope* sc)
-{
-    static bool isPointerToChar(Parameter p)
-    {
-        if (auto tptr = p.type.isTypePointer())
-        {
-            return tptr.next.ty == Tchar;
-        }
-        return false;
-    }
-
-    bool isVa_list(Parameter p)
-    {
-        return p.type.equals(target.va_listType(funcdecl.loc, sc));
-    }
-
-    const nparams = f.parameterList.length;
-    const p = (funcdecl.printf ? Id.printf : Id.scanf).toChars();
-    if (!(f.linkage == LINK.c || f.linkage == LINK.cpp))
-    {
-        .error(funcdecl.loc, "`pragma(%s)` function `%s` must have `extern(C)` or `extern(C++)` linkage,"
-            ~" not `extern(%s)`",
-            p, funcdecl.toChars(), f.linkage.linkageToChars());
-    }
-    if (f.parameterList.varargs == VarArg.variadic)
-    {
-        if (!(nparams >= 1 && isPointerToChar(f.parameterList[nparams - 1])))
-        {
-            .error(funcdecl.loc, "`pragma(%s)` function `%s` must have"
-                ~ " signature `%s %s([parameters...], const(char)*, ...)` not `%s`",
-                p, funcdecl.toChars(), f.next.toChars(), funcdecl.toChars(), funcdecl.type.toChars());
-        }
-    }
-    else if (f.parameterList.varargs == VarArg.none)
-    {
-        if(!(nparams >= 2 && isPointerToChar(f.parameterList[nparams - 2]) &&
-            isVa_list(f.parameterList[nparams - 1])))
-            .error(funcdecl.loc, "`pragma(%s)` function `%s` must have"~
-                " signature `%s %s([parameters...], const(char)*, va_list)`",
-                p, funcdecl.toChars(), f.next.toChars(), funcdecl.toChars());
-    }
-    else
-    {
-        .error(funcdecl.loc, "`pragma(%s)` function `%s` must have C-style variadic `...` or `va_list` parameter",
-            p, funcdecl.toChars());
-    }
-}
-
 /*********************************************
  * Search for ident as member of d.
  * Params:
@@ -7173,12 +7113,19 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
             error(bfd.loc, "bit field width %d is larger than type", bfd.fieldWidth);
 
         const style = target.c.bitFieldStyle;
+        if (style != TargetC.BitFieldStyle.MS && style != TargetC.BitFieldStyle.Gcc_Clang)
+            assert(0, "unsupported bit-field style");
+
+        const isMicrosoftStyle = style == TargetC.BitFieldStyle.MS;
+        const contributesToAggregateAlignment = target.c.contributesToAggregateAlignment(bfd);
 
         void startNewField()
         {
             if (log) printf("startNewField()\n");
             uint alignsize;
-            if (style == TargetC.BitFieldStyle.Gcc_Clang)
+            if (isMicrosoftStyle)
+               alignsize = memsize; // not memalignsize
+            else
             {
                 if (bfd.fieldWidth > 32)
                     alignsize = memalignsize;
@@ -7189,15 +7136,13 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
                 else
                     alignsize = 1;
             }
-            else
-                alignsize = memsize; // not memalignsize
 
             uint dummy;
             bfd.offset = placeField(bfd.loc,
                 fieldState.offset,
                 memsize, alignsize, bfd.alignment,
                 ad.structsize,
-                (anon && style == TargetC.BitFieldStyle.Gcc_Clang) ? dummy : ad.alignsize,
+                contributesToAggregateAlignment ? ad.alignsize : dummy,
                 isunion);
 
             fieldState.inFlight = true;
@@ -7206,45 +7151,30 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
             fieldState.fieldSize = memsize;
         }
 
-        if (style == TargetC.BitFieldStyle.Gcc_Clang)
-        {
-            if (bfd.fieldWidth == 0)
-            {
-                if (!isunion)
-                {
-                    // Use type of zero width field to align to next field
-                    fieldState.offset = (fieldState.offset + memalignsize - 1) & ~(memalignsize - 1);
-                    ad.structsize = fieldState.offset;
-                }
+        if (ad.alignsize == 0)
+            ad.alignsize = 1;
+        if (!isMicrosoftStyle && contributesToAggregateAlignment && ad.alignsize < memalignsize)
+            ad.alignsize = memalignsize;
 
-                fieldState.inFlight = false;
-                return;
+        if (bfd.fieldWidth == 0)
+        {
+            if (!isMicrosoftStyle && !isunion)
+            {
+                // Use type of zero width field to align to next field
+                fieldState.offset = (fieldState.offset + memalignsize - 1) & ~(memalignsize - 1);
+                ad.structsize = fieldState.offset;
+            }
+            else if (isMicrosoftStyle && fieldState.inFlight && !isunion)
+            {
+                // documentation says align to next int
+                //const alsz = cast(uint)Type.tint32.size();
+                const alsz = memsize; // but it really does this
+                fieldState.offset = (fieldState.offset + alsz - 1) & ~(alsz - 1);
+                ad.structsize = fieldState.offset;
             }
 
-            if (ad.alignsize == 0)
-                ad.alignsize = 1;
-            if (!anon &&
-                  ad.alignsize < memalignsize)
-                ad.alignsize = memalignsize;
-        }
-        else if (style == TargetC.BitFieldStyle.MS)
-        {
-            if (ad.alignsize == 0)
-                ad.alignsize = 1;
-            if (bfd.fieldWidth == 0)
-            {
-                if (fieldState.inFlight && !isunion)
-                {
-                    // documentation says align to next int
-                    //const alsz = cast(uint)Type.tint32.size();
-                    const alsz = memsize; // but it really does this
-                    fieldState.offset = (fieldState.offset + alsz - 1) & ~(alsz - 1);
-                    ad.structsize = fieldState.offset;
-                }
-
-                fieldState.inFlight = false;
-                return;
-            }
+            fieldState.inFlight = false;
+            return;
         }
 
         if (!fieldState.inFlight)
@@ -7252,7 +7182,7 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
             //printf("not in flight\n");
             startNewField();
         }
-        else if (style == TargetC.BitFieldStyle.Gcc_Clang)
+        else if (!isMicrosoftStyle)
         {
             // If the bit-field spans more units of alignment than its type
             // and is at the alignment boundary, start a new field at the
@@ -7277,7 +7207,7 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
                 }
             }
         }
-        else if (style == TargetC.BitFieldStyle.MS)
+        else
         {
             if (memsize != fieldState.fieldSize ||
                 fieldState.bitOffset + bfd.fieldWidth > fieldState.fieldSize * 8)
@@ -7286,14 +7216,14 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
                 startNewField();
             }
         }
-        else
-            assert(0);
 
         bfd.offset = fieldState.fieldOffset;
         bfd.bitOffset = fieldState.bitOffset;
 
         const pastField = bfd.bitOffset + bfd.fieldWidth;
-        if (style == TargetC.BitFieldStyle.Gcc_Clang)
+        if (isMicrosoftStyle)
+            fieldState.fieldSize = memsize;
+        else
         {
             auto size = (pastField + 7) / 8;
             fieldState.fieldSize = size;
@@ -7307,8 +7237,6 @@ private extern(C++) class SetFieldOffsetVisitor : Visitor
             else
                 ad.structsize = bfd.offset + size;
         }
-        else
-            fieldState.fieldSize = memsize;
         //printf("at end: ad.structsize = %d\n", cast(int)ad.structsize);
         //print(fieldState);
 

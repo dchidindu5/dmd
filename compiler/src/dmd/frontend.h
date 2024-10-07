@@ -1446,7 +1446,6 @@ public:
     virtual bool hasDefaultArg() = 0;
     const char* toChars() const override;
     DYNCAST dyncast() const override;
-    virtual RootObject* dummyArg() = 0;
     void accept(Visitor* v) override;
 };
 
@@ -1463,7 +1462,6 @@ public:
     RootObject* specialization() override;
     RootObject* defaultArg(const Loc& instLoc, Scope* sc) override;
     bool hasDefaultArg() override;
-    RootObject* dummyArg() override;
     void accept(Visitor* v) override;
 };
 
@@ -1621,7 +1619,6 @@ public:
     RootObject* specialization() final override;
     RootObject* defaultArg(const Loc& instLoc, Scope* sc) final override;
     bool hasDefaultArg() final override;
-    RootObject* dummyArg() final override;
     void accept(Visitor* v) override;
 };
 
@@ -1643,7 +1640,6 @@ public:
     RootObject* specialization() override;
     RootObject* defaultArg(const Loc& instLoc, Scope* sc) override;
     bool hasDefaultArg() override;
-    RootObject* dummyArg() override;
     void accept(Visitor* v) override;
 };
 
@@ -1660,7 +1656,6 @@ public:
     RootObject* specialization() override;
     RootObject* defaultArg(const Loc& instLoc, Scope* sc) override;
     bool hasDefaultArg() override;
-    RootObject* dummyArg() override;
     void accept(Visitor* v) override;
 };
 
@@ -3773,8 +3768,6 @@ public:
     bool isCodeseg() const final override;
     bool isOverloadable() const final override;
     bool isAbstract() final override;
-    bool isSafe();
-    bool isTrusted();
     virtual bool isNested() const;
     AggregateDeclaration* isThis() override;
     bool needThis() final override;
@@ -5911,6 +5904,7 @@ struct TargetC final
     uint8_t wchar_tsize;
     Runtime runtime;
     BitFieldStyle bitFieldStyle;
+    bool contributesToAggregateAlignment(BitFieldDeclaration* bfd);
     TargetC() :
         crtDestructorsSupported(true),
         boolsize(),
@@ -6149,7 +6143,6 @@ public:
     virtual Scope* newScope(Scope* sc);
     virtual void finalizeSize() = 0;
     uinteger_t size(const Loc& loc) final override;
-    bool fill(const Loc& loc, Array<Expression* >& elements, bool ctorinit);
     Type* getType() final override;
     bool isDeprecated() const final override;
     bool isNested() const;
@@ -7603,7 +7596,7 @@ public:
 
 extern Target target;
 
-extern Type* getTypeInfoType(const Loc& loc, Type* t, Scope* sc, bool genObjCode = true);
+extern Type* getTypeInfoType(const Loc& loc, Type* t, Scope* sc);
 
 class SemanticTimeTransitiveVisitor : public SemanticTimePermissiveVisitor
 {
